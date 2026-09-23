@@ -3,9 +3,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-print("BASE URL:", os.getenv("AGENTROUTER_BASE_URL"))
-print("MODEL:", os.getenv("AGENTROUTER_MODEL"))
-print("KEY EXISTS:", bool(os.getenv("AGENTROUTER_API_KEY")))
+
 
 client = AsyncOpenAI(
     api_key=os.getenv("AGENTROUTER_API_KEY"),
