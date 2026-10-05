@@ -7,7 +7,10 @@ def parse_diff(diff: str):
         lines = section.splitlines()
 
         first_line = lines[0]
-        parts = first_line.split(" ")
+        parts = first_line.split()
+
+        if len(parts) < 2:
+            continue
 
         old_file = parts[0][2:]
         new_file = parts[1][2:]

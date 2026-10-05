@@ -1,9 +1,11 @@
 import os
 import httpx
+import asyncio
 from fastapi import FastAPI
 from app.github.client import (
     get_pull_request,
-    get_pull_request_diff
+    get_pull_request_diff,
+    get_file_content
 )
 from app.github.diff_parser import parse_diff
 from app.llm import review_code
@@ -20,6 +22,7 @@ async def get_pr(
     repo: str,
     pr_number: int
 ):
+    
     pr = await get_pull_request(owner, repo, pr_number)
 
     return {
@@ -44,8 +47,26 @@ async def get_pr_diff(
         repo,
         pr_number
     )
-    return parse_diff(diff)
+    files = parse_diff(diff)
+    # for file in files:
+    #     file["content"] = await get_file_content(owner=owner, repo=repo,filename=file["filename"])
+    #     print(file["content"])
+    return files
 
+async def safe_review(file,owner : str,repo : str,pr_number : int):
+    try:
+        pr = get_pull_request(owner=owner,repo=repo,pr_number=pr_number)
+        ref = pr["head"]["sha"]
+        file["content"] = await get_file_content(owner=owner,repo=repo,filename=file["filename"],ref=ref)
+        return await review_code(
+            file["filename"],
+            file["patch"],
+            file["content"],
+        )
+    except Exception as e:
+        return f"Review failed: {str(e)}"
+
+    
 @app.get("/github/review/{owner}/{repo}/{pr_number}/review")
 async def get_pr_review(
     owner: str,
@@ -59,14 +80,15 @@ async def get_pr_review(
     )
     files = parse_diff(diff)
     res = []
-    for file in files:
-        review = await review_code(
-            file["filename"],
-            file["patch"]
-        )
-        res.append({
-            "filename" : file["filename"],
-            "review" : review
-        })
+    reviews = await asyncio.gather(
+        *[
+            safe_review(file,owner,repo,pr_number)
+            for file in files
+        ]
+    )
 
-    return res
+    for file, review in zip(files, reviews):
+        file["review"] = review
+
+    return files
+    
