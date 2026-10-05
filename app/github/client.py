@@ -1,5 +1,6 @@
 import os
 import httpx
+import base64
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,3 +46,24 @@ async def get_pull_request_diff(owner: str, repo: str, pr_number: int):
         )
 
     return response.text
+
+async def get_file_content(
+        owner: str,
+        repo: str,
+        filename: str,
+        ref : str
+        ):
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{filename}?ref={ref}"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            url,
+            headers=headers
+        )
+    if response.status_code != 200:
+        raise Exception(
+            f"galat.."
+        )
+    data = response.json()
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return content
