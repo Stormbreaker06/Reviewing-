@@ -14,7 +14,15 @@ def parse_diff(diff: str):
 
         old_file = parts[0][2:]
         new_file = parts[1][2:]
-
+        if any(line.startswith("Binary files") for line in lines):
+            files.append({
+                "filename": new_file,
+                "status": "binary",
+                "patch": "",
+                "additions": 0,
+                "deletions": 0
+            })
+            continue
         patch_lines = []
         additions = 0
         deletions = 0
