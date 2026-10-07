@@ -77,12 +77,6 @@ def parse_review(review: str):
             "message": "No response from LLM"
         }
 
-    if review.strip().upper() == "NO ISSUES":
-        return {
-            "status": "clean",
-            "issues": []
-        }
-
     issues = []
 
     for block in review.split("---"):
@@ -114,7 +108,23 @@ def parse_review(review: str):
         if issue:
             issues.append(issue)
 
+    if issues:
+        return {
+            "status": "reviewed",
+            "issues": issues
+        }
+
+    for line in review.splitlines():
+        if line.strip().upper().rstrip(".!") == "NO ISSUES":
+            return {
+                "status": "clean",
+                "issues": []
+            }
+
+    # Nothing recognizable in the output. Report an error so this is NEVER
+    # treated as a successful empty review and never enters the cache -
+    # the caller retries and, if it still fails, the next request re-reviews.
     return {
-        "status": "reviewed",
-        "issues": issues
+        "status": "error",
+        "message": "LLM returned an unrecognized response"
     }

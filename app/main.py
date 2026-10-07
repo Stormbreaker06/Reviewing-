@@ -1,6 +1,7 @@
 import os
 import httpx
 import asyncio
+import time
 from fastapi import FastAPI
 from app.github.client import (
     get_pull_request,
@@ -10,6 +11,31 @@ from app.github.client import (
 from app.github.diff_parser import parse_diff
 from app.llm import review_code
 app = FastAPI()
+
+# Same PR (same head SHA) + same file patch -> same review, served from cache.
+# Only successful, parsed reviews are cached; failures/garbage are NEVER stored
+# (they retry on the next request) and entries expire after CACHE_TTL seconds.
+_review_cache: dict[tuple, tuple] = {}
+_file_review_cache: dict[tuple, tuple] = {}
+CACHE_LIMIT = 50
+CACHE_TTL = float(os.getenv("REVIEW_CACHE_TTL", "600"))
+
+
+def _remember(cache: dict, key: tuple, value) -> None:
+    if len(cache) >= CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = (value, time.monotonic())
+
+
+def _lookup(cache: dict, key: tuple):
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    value, stored_at = entry
+    if time.monotonic() - stored_at > CACHE_TTL:
+        cache.pop(key, None)
+        return None
+    return value
 
 @app.get("/")
 async def root():
@@ -60,17 +86,27 @@ async def safe_review(
         pr_number : int,
         ref: str
     ):
+    cache_key = (ref, file["filename"], file.get("patch") or "")
+    cached = _lookup(_file_review_cache, cache_key)
+    if cached is not None:
+        return cached
     try:
         # pr = await get_pull_request(owner=owner,repo=repo,pr_number=pr_number)
         # ref = pr["head"]["sha"]
         file["content"] = await get_file_content(owner=owner,repo=repo,filename=file["filename"],ref=ref)
-        return await review_code(
+        result = await review_code(
             file["filename"],
             file["patch"],
             file["content"],
         )
+        if isinstance(result, dict) and result.get("status") in ("clean", "reviewed"):
+            _remember(_file_review_cache, cache_key, result)
+        return result
     except Exception as e:
-        return f"Review failed: {str(e)}"
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
     
 @app.get("/github/review/{owner}/{repo}/{pr_number}/review")
@@ -85,6 +121,11 @@ async def get_pr_review(
         pr_number
     )
     ref = pr["head"]["sha"]
+
+    pr_key = (owner, repo, pr_number, ref)
+    cached = _lookup(_review_cache, pr_key)
+    if cached is not None:
+        return cached
 
     diff = await get_pull_request_diff(
         owner,
@@ -101,7 +142,15 @@ async def get_pr_review(
     res = []
     for file, review in zip(files, reviews):
         file["review"] = review
-        res.append(file["review"])
+        file.pop("content", None)
+        res.append(file)
+
+    if res and all(
+        isinstance(r.get("review"), dict)
+        and r["review"].get("status") in ("clean", "reviewed")
+        for r in res
+    ):
+        _remember(_review_cache, pr_key, res)
 
     return res
     
