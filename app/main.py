@@ -84,20 +84,29 @@ async def safe_review(
         owner : str,
         repo : str,
         pr_number : int,
-        ref: str
+        ref: str,
+        base_ref: str = None
     ):
+    # Binary files have nothing textual to review - never fetch, never call the LLM.
+    if file.get("status") == "binary":
+        return {
+            "status": "skipped",
+            "message": "Binary file - nothing to review"
+        }
     cache_key = (ref, file["filename"], file.get("patch") or "")
     cached = _lookup(_file_review_cache, cache_key)
     if cached is not None:
         return cached
     try:
-        # pr = await get_pull_request(owner=owner,repo=repo,pr_number=pr_number)
-        # ref = pr["head"]["sha"]
-        file["content"] = await get_file_content(owner=owner,repo=repo,filename=file["filename"],ref=ref)
+        # Deleted files no longer exist at the head ref - read the pre-deletion
+        # content from the base commit so the deletion itself can be reviewed.
+        content_ref = base_ref if file.get("status") == "deleted" and base_ref else ref
+        file["content"] = await get_file_content(owner=owner,repo=repo,filename=file["filename"],ref=content_ref)
         result = await review_code(
             file["filename"],
             file["patch"],
             file["content"],
+            file.get("status", "modified"),
         )
         if isinstance(result, dict) and result.get("status") in ("clean", "reviewed"):
             _remember(_file_review_cache, cache_key, result)
@@ -121,6 +130,7 @@ async def get_pr_review(
         pr_number
     )
     ref = pr["head"]["sha"]
+    base_ref = pr["base"]["sha"]
 
     pr_key = (owner, repo, pr_number, ref)
     cached = _lookup(_review_cache, pr_key)
@@ -135,7 +145,7 @@ async def get_pr_review(
     files = parse_diff(diff)
     reviews = await asyncio.gather(
         *[
-            safe_review(file,owner,repo,pr_number,ref)
+            safe_review(file,owner,repo,pr_number,ref,base_ref)
             for file in files
         ]
     )
@@ -147,7 +157,7 @@ async def get_pr_review(
 
     if res and all(
         isinstance(r.get("review"), dict)
-        and r["review"].get("status") in ("clean", "reviewed")
+        and r["review"].get("status") in ("clean", "reviewed", "skipped")
         for r in res
     ):
         _remember(_review_cache, pr_key, res)

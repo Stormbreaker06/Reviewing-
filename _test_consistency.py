@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import types
+from itertools import count
 
 os.environ["REVIEW_RETRY_DELAY"] = "0.01"
 os.environ["REVIEW_MAX_ATTEMPTS"] = "3"
@@ -58,7 +59,8 @@ def make_provider(name, client, models):
 
 
 def use_single(client, models=("pinned/test-model",)):
-    llm.PROVIDERS = [make_provider("P", client, models)]
+    provider = make_provider("P", client, models)
+    llm.ENDPOINTS = [(provider, m) for m in models]
 
 
 async def test_llm():
@@ -94,7 +96,7 @@ async def test_llm():
     use_single(client)
     out = await llm.review_code("a.py", "p", "c")
     check("empty retried -> error",
-          state["calls"] == 3 and out == {"status": "error", "message": "No response from LLM"},
+          state["calls"] == 2 and out == {"status": "error", "message": "No response from LLM"},
           (state["calls"], out))
 
     # 5. transient error on every attempt -> error after retries
@@ -116,7 +118,7 @@ async def test_llm():
 async def test_main_cache():
     counters = {"review": 0}
 
-    async def fake_review_code(filename, patch, content):
+    async def fake_review_code(filename, patch, content, status="modified"):
         counters["review"] += 1
         return {"status": "clean", "issues": []}
 
@@ -136,7 +138,7 @@ async def test_main_cache():
     check("file cache hit", counters["review"] == 1, counters)
 
     # error results are NOT cached -> retried next request
-    async def failing_review(filename, patch, content):
+    async def failing_review(filename, patch, content, status="modified"):
         counters["review"] += 1
         return {"status": "error", "message": "No response from LLM"}
 
@@ -153,7 +155,7 @@ async def test_main_cache():
     counters["review"] = 0
 
     async def fake_pr(owner, repo, pr_number):
-        return {"head": {"sha": "sha1"}}
+        return {"head": {"sha": "sha1"}, "base": {"sha": "base1"}}
 
     diff_text = "\n".join([
         "diff --git a/app/x.py b/app/x.py",
@@ -225,13 +227,13 @@ async def test_parse_and_ttl():
     use_single(client)
     out = await llm.review_code("a.py", "p", "c")
     check("all garbage -> error",
-          state["calls"] == 3 and out["status"] == "error"
+          state["calls"] == 2 and out["status"] == "error"
           and "unrecognized" in out["message"], (state["calls"], out))
 
     # failed review never enters the cache -> retried next request
     counters = {"review": 0}
 
-    async def garbage_review(filename, patch, content):
+    async def garbage_review(filename, patch, content, status="modified"):
         counters["review"] += 1
         return {"status": "error", "message": "LLM returned an unrecognized response"}
 
@@ -248,7 +250,7 @@ async def test_parse_and_ttl():
           counters["review"] == 2 and r1["status"] == "error", counters)
 
     # TTL: cached within TTL, re-reviewed after expiry
-    async def clean_review(filename, patch, content):
+    async def clean_review(filename, patch, content, status="modified"):
         counters["review"] += 1
         return {"status": "clean", "issues": []}
 
@@ -267,19 +269,13 @@ async def test_parse_and_ttl():
 
 
 async def test_model_rotation():
-    saved = (
-        llm.PROVIDERS,
-        dict(llm._endpoint_cooldowns),
-        dict(llm._provider_cooldowns),
-        llm._endpoint_cursor,
-    )
+    saved = (llm.ENDPOINTS, dict(llm._cooldowns), llm._cursor)
     try:
         # round-robin across models on ONE key
         c1, s1 = make_client([make_response("NO ISSUES")] * 5)
-        llm.PROVIDERS = [make_provider("K1", c1, ["modelA", "modelB"])]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        use_single(c1, ["modelA", "modelB"])
+        llm._cooldowns.clear()
+        llm._cursor = count()
         await llm.review_code("a.py", "p", "c")
         await llm.review_code("a.py", "p", "c")
         await llm.review_code("a.py", "p", "c")
@@ -289,13 +285,12 @@ async def test_model_rotation():
         # round-robin across TWO keys (no key overused)
         ck1, sk1 = make_client([make_response("NO ISSUES")] * 5)
         ck2, sk2 = make_client([make_response("NO ISSUES")] * 5)
-        llm.PROVIDERS = [
-            make_provider("K1", ck1, ["m"]),
-            make_provider("K2", ck2, ["m"]),
+        llm.ENDPOINTS = [
+            (make_provider("K1", ck1, ["m"]), "m"),
+            (make_provider("K2", ck2, ["m"]), "m"),
         ]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        llm._cooldowns.clear()
+        llm._cursor = count()
         await llm.review_code("a.py", "p", "c")
         await llm.review_code("a.py", "p", "c")
         check("round-robin spreads across keys",
@@ -304,26 +299,25 @@ async def test_model_rotation():
         # 429 on key1 -> endpoint cooldown + failover to key2
         ck1, sk1 = make_client([http_error(RateLimitError, 429)])
         ck2, sk2 = make_client([make_response("NO ISSUES")])
-        llm.PROVIDERS = [
-            make_provider("K1", ck1, ["m"]),
-            make_provider("K2", ck2, ["m"]),
+        llm.ENDPOINTS = [
+            (make_provider("K1", ck1, ["m"]), "m"),
+            (make_provider("K2", ck2, ["m"]), "m"),
         ]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        llm._cooldowns.clear()
+        llm._cursor = count()
         out = await llm.review_code("a.py", "p", "c")
         check("429 -> failover to next key",
               out == {"status": "clean", "issues": []}
               and sk1["calls"] == 1 and sk2["calls"] == 1,
               (out, sk1["calls"], sk2["calls"]))
         check("rate-limited endpoint cooled",
-              llm._endpoint_cooldowns.get(("K1", "m"), 0.0) > time.monotonic())
+              llm._cooldowns.get(("K1", "m"), 0.0) > time.monotonic())
 
         # cooled endpoint is skipped on the next call
         ck3, sk3 = make_client([make_response("NO ISSUES")])
-        llm.PROVIDERS = [
-            make_provider("K1", ck1, ["m"]),
-            make_provider("K2", ck3, ["m"]),
+        llm.ENDPOINTS = [
+            (make_provider("K1", ck1, ["m"]), "m"),
+            (make_provider("K2", ck3, ["m"]), "m"),
         ]
         out = await llm.review_code("a.py", "p", "c")
         check("cooldown skips rate-limited key",
@@ -333,31 +327,29 @@ async def test_model_rotation():
         # dead key (401) -> whole key cooled + failover to the next key
         ck1, sk1 = make_client([http_error(AuthenticationError, 401)])
         ck2, sk2 = make_client([make_response("NO ISSUES")])
-        llm.PROVIDERS = [
-            make_provider("K1", ck1, ["m"]),
-            make_provider("K2", ck2, ["m"]),
+        llm.ENDPOINTS = [
+            (make_provider("K1", ck1, ["m"]), "m"),
+            (make_provider("K2", ck2, ["m"]), "m"),
         ]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        llm._cooldowns.clear()
+        llm._cursor = count()
         out = await llm.review_code("a.py", "p", "c")
         check("401 -> failover to next key",
               out == {"status": "clean", "issues": []}
               and sk1["calls"] == 1 and sk2["calls"] == 1,
               (out, sk1["calls"], sk2["calls"]))
         check("dead key cooled down",
-              llm._provider_cooldowns.get("K1", 0.0) > time.monotonic())
+              llm._cooldowns.get(("K1",), 0.0) > time.monotonic())
 
         # every key dead -> error mentioning No response from LLM
         ck1, sk1 = make_client([http_error(AuthenticationError, 401)])
         ck2, sk2 = make_client([http_error(AuthenticationError, 401)])
-        llm.PROVIDERS = [
-            make_provider("K1", ck1, ["m"]),
-            make_provider("K2", ck2, ["m"]),
+        llm.ENDPOINTS = [
+            (make_provider("K1", ck1, ["m"]), "m"),
+            (make_provider("K2", ck2, ["m"]), "m"),
         ]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        llm._cooldowns.clear()
+        llm._cursor = count()
         out = await llm.review_code("a.py", "p", "c")
         check("all keys dead -> error",
               out["status"] == "error" and "No response from LLM" in out["message"]
@@ -366,22 +358,16 @@ async def test_model_rotation():
 
         # single dead key -> fail fast after one call
         ck1, sk1 = make_client([http_error(AuthenticationError, 401)])
-        llm.PROVIDERS = [make_provider("K1", ck1, ["m"])]
-        llm._endpoint_cooldowns.clear()
-        llm._provider_cooldowns.clear()
-        llm._endpoint_cursor = 0
+        llm.ENDPOINTS = [(make_provider("K1", ck1, ["m"]), "m")]
+        llm._cooldowns.clear()
+        llm._cursor = count()
         out = await llm.review_code("a.py", "p", "c")
         check("single dead key fail fast",
               sk1["calls"] == 1 and out["status"] == "error"
               and "No response from LLM" in out["message"],
               (sk1["calls"], out))
     finally:
-        (
-            llm.PROVIDERS,
-            llm._endpoint_cooldowns,
-            llm._provider_cooldowns,
-            llm._endpoint_cursor,
-        ) = saved
+        llm.ENDPOINTS, llm._cooldowns, llm._cursor = saved
 
 
 async def test_base_url_detection():
@@ -400,22 +386,26 @@ async def test_base_url_detection():
         os.environ["NOPE_API_KEY"] = "mystery-key-2"
         os.environ.pop("NOPE_BASE_URL", None)
 
-        providers = {p["name"]: p for p in llm._build_providers()}
+        endpoints = llm._build_endpoints()
+        names = {p["name"] for p, _m in endpoints}
 
         check("groq by name -> base url",
-              providers.get("GROQ", {}).get("base_url") == "https://api.groq.com/openai/v1",
-              providers.get("GROQ", {}).get("base_url"))
+              llm._resolve_base_url("GROQ", "gsk_fake_key") == "https://api.groq.com/openai/v1",
+              llm._resolve_base_url("GROQ", "gsk_fake_key"))
         check("ollama by name beats key prefix",
-              providers.get("OLLAMA", {}).get("base_url") == "https://ollama.com/v1",
-              providers.get("OLLAMA", {}).get("base_url"))
+              llm._resolve_base_url("OLLAMA", "sk-looks-like-an-openai-key")
+              == "https://ollama.com/v1",
+              llm._resolve_base_url("OLLAMA", "sk-looks-like-an-openai-key"))
         check("custom NAME_BASE_URL wins",
-              providers.get("ZZTEST", {}).get("base_url") == "http://custom.example/v1",
-              providers.get("ZZTEST", {}).get("base_url"))
-        check("unknown provider without base url skipped",
-              "NOPE" not in providers, list(providers))
+              llm._resolve_base_url("ZZTEST", "mystery-key") == "http://custom.example/v1",
+              llm._resolve_base_url("ZZTEST", "mystery-key"))
+        check("unknown provider has no base url",
+              llm._resolve_base_url("NOPE", "mystery-key-2") == "",
+              llm._resolve_base_url("NOPE", "mystery-key-2"))
+        check("unknown provider skipped by builder", "NOPE" not in names, names)
+        groq_models = sorted({m for p, m in endpoints if p["name"] == "GROQ"})
         check("models fall back to default pool",
-              providers.get("GROQ", {}).get("models") == ["pinned/test-model"],
-              providers.get("GROQ", {}).get("models"))
+              groq_models == ["pinned/test-model"], groq_models)
     finally:
         for key, value in saved.items():
             if value is None:
@@ -424,12 +414,142 @@ async def test_base_url_detection():
                 os.environ[key] = value
 
 
+async def test_deleted_binary():
+    from app.github.diff_parser import parse_diff
+
+    deleted_diff = "\n".join([
+        "diff --git a/app/gone.py b/app/gone.py",
+        "deleted file mode 100644",
+        "index abc1234..0000000",
+        "--- a/app/gone.py",
+        "+++ /dev/null",
+        "@@ -1,3 +0,0 @@",
+        "-def a():",
+        "-    return 1",
+        "-",
+    ])
+    files = parse_diff(deleted_diff)
+    check("deleted file detected",
+          len(files) == 1 and files[0]["status"] == "deleted"
+          and files[0]["filename"] == "app/gone.py" and files[0]["deletions"] == 3,
+          files)
+
+    added_diff = "\n".join([
+        "diff --git a/app/new.py b/app/new.py",
+        "new file mode 100644",
+        "index 0000000..abc1234",
+        "--- /dev/null",
+        "+++ b/app/new.py",
+        "@@ -0,0 +1,2 @@",
+        "+def x():",
+        "+    return 2",
+    ])
+    files = parse_diff(added_diff)
+    check("added file detected",
+          len(files) == 1 and files[0]["status"] == "added"
+          and files[0]["additions"] == 2, files)
+
+    binary_diff = "\n".join([
+        "diff --git a/img.png b/img.png",
+        "index abc..def 100644",
+        "Binary files a/img.png and b/img.png differ",
+    ])
+    files = parse_diff(binary_diff)
+    check("binary file detected",
+          len(files) == 1 and files[0]["status"] == "binary", files)
+
+    modified_diff = "\n".join([
+        "diff --git a/app/x.py b/app/x.py",
+        "index 111..222 100644",
+        "--- a/app/x.py",
+        "+++ b/app/x.py",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+    ])
+    files = parse_diff(modified_diff)
+    check("modified still detected",
+          len(files) == 1 and files[0]["status"] == "modified", files)
+
+    # safe_review: binary -> skipped, no content fetch, no LLM call
+    counters = {"review": 0, "content": 0}
+
+    async def counting_review(filename, patch, content, status="modified"):
+        counters["review"] += 1
+        return {"status": "clean", "issues": []}
+
+    async def counting_content(**kwargs):
+        counters["content"] += 1
+        return "code"
+
+    app_main.review_code = counting_review
+    app_main.get_file_content = counting_content
+    app_main._file_review_cache.clear()
+
+    bfile = {"filename": "img.png", "status": "binary", "patch": ""}
+    out = await app_main.safe_review(dict(bfile), "o", "r", 1, "sha1")
+    check("binary skipped without llm or fetch",
+          out == {"status": "skipped", "message": "Binary file - nothing to review"}
+          and counters == {"review": 0, "content": 0}, (out, counters))
+
+    # deleted -> content fetched at BASE ref, status passed to the LLM
+    fetched_refs = []
+    captured_statuses = []
+
+    async def capturing_content(**kwargs):
+        fetched_refs.append(kwargs.get("ref"))
+        return "old content"
+
+    async def capturing_review(filename, patch, content, status="modified"):
+        captured_statuses.append(status)
+        return {"status": "clean", "issues": []}
+
+    app_main.get_file_content = capturing_content
+    app_main.review_code = capturing_review
+    dfile = {"filename": "app/gone.py", "status": "deleted", "patch": "-def a():"}
+    out = await app_main.safe_review(dict(dfile), "o", "r", 1, "head1", base_ref="base1")
+    check("deleted fetched from base ref", fetched_refs == ["base1"], fetched_refs)
+    check("deleted status passed to llm", captured_statuses == ["deleted"], captured_statuses)
+    check("deleted review ok", out == {"status": "clean", "issues": []}, out)
+
+    # a binary file must NOT block the PR-level cache ('skipped' is success-ish)
+    async def fake_pr2(owner, repo, pr_number):
+        return {"head": {"sha": "sha9"}, "base": {"sha": "base9"}}
+
+    async def fake_diff2(owner, repo, pr_number):
+        return binary_diff + "\n" + modified_diff
+
+    pr_counters = {"review": 0}
+
+    async def pr_review(filename, patch, content, status="modified"):
+        pr_counters["review"] += 1
+        return {"status": "clean", "issues": []}
+
+    async def pr_content(**kwargs):
+        return "code"
+
+    app_main.review_code = pr_review
+    app_main.get_file_content = pr_content
+    app_main.get_pull_request = fake_pr2
+    app_main.get_pull_request_diff = fake_diff2
+    app_main._file_review_cache.clear()
+    app_main._review_cache.clear()
+
+    r1 = await app_main.get_pr_review("octo", "repo", 11)
+    r2 = await app_main.get_pr_review("octo", "repo", 11)
+    statuses = {f["status"] for f in r1}
+    check("pr response includes binary+modified", {"binary", "modified"} <= statuses, statuses)
+    check("pr cache stores despite skipped file",
+          r2 is r1 and pr_counters["review"] == 1, (pr_counters["review"], r2 is r1))
+
+
 async def main():
     await test_llm()
     await test_main_cache()
     await test_parse_and_ttl()
     await test_model_rotation()
     await test_base_url_detection()
+    await test_deleted_binary()
 
     ok = True
     for name, passed, info in results:

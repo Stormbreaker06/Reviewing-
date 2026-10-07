@@ -62,8 +62,12 @@ async def get_file_content(
         )
     if response.status_code != 200:
         raise Exception(
-            f"galat.."
+            f"GitHub API error {response.status_code} fetching {filename} at {ref}"
         )
     data = response.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
+    if not isinstance(data, dict) or "content" not in data:
+        raise Exception(
+            f"GitHub returned no file content for {filename} at {ref}"
+        )
+    content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
     return content

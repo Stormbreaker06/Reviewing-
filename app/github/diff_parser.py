@@ -14,7 +14,10 @@ def parse_diff(diff: str):
 
         old_file = parts[0][2:]
         new_file = parts[1][2:]
-        if any(line.startswith("Binary files") for line in lines):
+        if any(
+            line.startswith("Binary files") or line.startswith("GIT binary patch")
+            for line in lines
+        ):
             files.append({
                 "filename": new_file,
                 "status": "binary",
@@ -47,15 +50,26 @@ def parse_diff(diff: str):
             ):
                 patch_lines.append(line)
 
-        if old_file == new_file:
-            status = "modified"
-            filename = new_file
-        elif old_file == "/dev/null":
-            status = "added"
-            filename = new_file
-        elif new_file == "/dev/null":
+        # Standard git headers keep the same a/b path for add/delete, so the
+        # real signals are "new file mode"/"deleted file mode" and /dev/null.
+        is_new = any(
+            line.startswith("new file mode") or line.startswith("--- /dev/null")
+            for line in lines
+        )
+        is_deleted = any(
+            line.startswith("deleted file mode") or line.startswith("+++ /dev/null")
+            for line in lines
+        )
+
+        if is_deleted:
             status = "deleted"
             filename = old_file
+        elif is_new:
+            status = "added"
+            filename = new_file
+        elif old_file == new_file:
+            status = "modified"
+            filename = new_file
         else:
             status = "renamed"
             filename = new_file
