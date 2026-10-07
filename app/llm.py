@@ -1,6 +1,11 @@
 import os
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
+from app.model import (
+    ReviewIssue,
+    ReviewResult
+)
+from app.github.diff_parser import parse_review
 import asyncio
 load_dotenv()
 
@@ -53,22 +58,70 @@ async def review_code(filename: str, patch: str, content: str):
     Why it matters
     A concrete way to fix it
 
-    If the changes do not introduce any meaningful problems, respond with exactly:
-
-    "No significant issues found."
-
     Do not invent issues. Prefer a small number of high-confidence findings over many speculative findings.
+    
+
+    The JSON must follow this structure:
+
+    For each issue, use this format:
+
+    ISSUE
+    Severity: High/Medium/Low
+    Line: <line number if applicable>
+    Title: <short title>
+    Description: <what is wrong and why>
+    Fix: <how to fix it>
+
+    Separate multiple issues with:
+
+    If there are no meaningful issues, simply return:
+
+    NO ISSUES
+
+    Return plain text only.
+
+    Do not include markdown, code fences, or any text outside the JSON.
     """
 
-    response = await client.chat.completions.create(
-        model="openrouter/free",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
+    try:
+        response = await client.chat.completions.create(
+            model="cohere/north-mini-code:free",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=4000,
+            extra_body={
+                "reasoning":{
+                    "max_tokens":2000
+                }
             }
-        ],
-        max_tokens=1500
-    )
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"No response from LLM: {str(e)}"
+        }
 
-    return response.choices[0].message.content
+    if response is None or not response.choices:
+        return {
+            "status": "error",
+            "message": "No response from LLM"
+        }
+
+    print("FINISH:", response.choices[0].finish_reason)
+    print("CONTENT:", response.choices[0].message.content)
+    print("REASONING:", response.choices[0].message.reasoning)
+    content = response.choices[0].message.content
+    if not content:
+        return {
+            "status": "error",
+            "message": "No response from LLM"
+        }
+    
+
+    result = parse_review(content)
+
+    return result

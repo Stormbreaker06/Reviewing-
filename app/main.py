@@ -53,10 +53,16 @@ async def get_pr_diff(
     #     print(file["content"])
     return files
 
-async def safe_review(file,owner : str,repo : str,pr_number : int):
+async def safe_review(
+        file,
+        owner : str,
+        repo : str,
+        pr_number : int,
+        ref: str
+    ):
     try:
-        pr = get_pull_request(owner=owner,repo=repo,pr_number=pr_number)
-        ref = pr["head"]["sha"]
+        # pr = await get_pull_request(owner=owner,repo=repo,pr_number=pr_number)
+        # ref = pr["head"]["sha"]
         file["content"] = await get_file_content(owner=owner,repo=repo,filename=file["filename"],ref=ref)
         return await review_code(
             file["filename"],
@@ -73,22 +79,29 @@ async def get_pr_review(
     repo: str,
     pr_number :int
 ):
+    pr = await get_pull_request(
+        owner,
+        repo,
+        pr_number
+    )
+    ref = pr["head"]["sha"]
+
     diff = await get_pull_request_diff(
         owner,
         repo,
         pr_number
     )
     files = parse_diff(diff)
-    res = []
     reviews = await asyncio.gather(
         *[
-            safe_review(file,owner,repo,pr_number)
+            safe_review(file,owner,repo,pr_number,ref)
             for file in files
         ]
     )
-
+    res = []
     for file, review in zip(files, reviews):
         file["review"] = review
+        res.append(file["review"])
 
-    return files
+    return res
     

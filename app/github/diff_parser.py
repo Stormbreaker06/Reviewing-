@@ -14,7 +14,15 @@ def parse_diff(diff: str):
 
         old_file = parts[0][2:]
         new_file = parts[1][2:]
-
+        if any(line.startswith("Binary files") for line in lines):
+            files.append({
+                "filename": new_file,
+                "status": "binary",
+                "patch": "",
+                "additions": 0,
+                "deletions": 0
+            })
+            continue
         patch_lines = []
         additions = 0
         deletions = 0
@@ -61,3 +69,52 @@ def parse_diff(diff: str):
         })
 
     return files
+
+def parse_review(review: str):
+    if not review:
+        return {
+            "status": "error",
+            "message": "No response from LLM"
+        }
+
+    if review.strip().upper() == "NO ISSUES":
+        return {
+            "status": "clean",
+            "issues": []
+        }
+
+    issues = []
+
+    for block in review.split("---"):
+        block = block.strip()
+
+        if not block:
+            continue
+
+        issue = {}
+
+        for line in block.splitlines():
+            line = line.strip()
+
+            if line.startswith("Severity:"):
+                issue["severity"] = line.split(":", 1)[1].strip()
+
+            elif line.startswith("Line:"):
+                issue["line"] = line.split(":", 1)[1].strip()
+
+            elif line.startswith("Title:"):
+                issue["title"] = line.split(":", 1)[1].strip()
+
+            elif line.startswith("Description:"):
+                issue["description"] = line.split(":", 1)[1].strip()
+
+            elif line.startswith("Fix:"):
+                issue["fix"] = line.split(":", 1)[1].strip()
+
+        if issue:
+            issues.append(issue)
+
+    return {
+        "status": "reviewed",
+        "issues": issues
+    }
