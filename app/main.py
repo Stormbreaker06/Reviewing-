@@ -98,9 +98,10 @@ async def get_pr_review(
             for file in files
         ]
     )
-
+    res = []
     for file, review in zip(files, reviews):
         file["review"] = review
+        res.append(file["review"])
 
-    return files
+    return res
     
