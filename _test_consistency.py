@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import time
 import types
@@ -543,6 +544,39 @@ async def test_deleted_binary():
           r2 is r1 and pr_counters["review"] == 1, (pr_counters["review"], r2 is r1))
 
 
+async def test_cache_key_hashing():
+    counters = {"review": 0}
+
+    async def reviewing(filename, patch, content, status="modified"):
+        counters["review"] += 1
+        return {"status": "clean", "issues": []}
+
+    async def fake_content(**kwargs):
+        return "code"
+
+    app_main.review_code = reviewing
+    app_main.get_file_content = fake_content
+    app_main._file_review_cache.clear()
+
+    p1 = {"filename": "app/h.py", "status": "modified",
+          "patch": "@@ -1 +1 @@\n-aaaa\n+bbbb"}
+    await app_main.safe_review(dict(p1), "o", "r", 1, "sha1")
+    await app_main.safe_review(dict(p1), "o", "r", 1, "sha1")
+    check("hashed key still caches", counters["review"] == 1, counters)
+
+    keys = list(app_main._file_review_cache.keys())
+    expected = hashlib.sha256(p1["patch"].encode("utf-8", errors="replace")).hexdigest()
+    check("key holds sha256 digest not raw patch",
+          len(keys) == 1 and keys[0][2] == expected and len(keys[0][2]) == 64,
+          keys)
+
+    # different patch of the SAME length -> different digest -> re-reviewed
+    p2 = {"filename": "app/h.py", "status": "modified",
+          "patch": "@@ -1 +1 @@\n-cccc\n+dddd"}
+    await app_main.safe_review(dict(p2), "o", "r", 1, "sha1")
+    check("different patch -> different key", counters["review"] == 2, counters)
+
+
 async def main():
     await test_llm()
     await test_main_cache()
@@ -550,6 +584,7 @@ async def main():
     await test_model_rotation()
     await test_base_url_detection()
     await test_deleted_binary()
+    await test_cache_key_hashing()
 
     ok = True
     for name, passed, info in results:

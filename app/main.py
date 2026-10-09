@@ -1,3 +1,4 @@
+import hashlib
 import os
 import httpx
 import asyncio
@@ -37,6 +38,12 @@ def _lookup(cache: dict, key: tuple):
         return None
     return value
 
+
+def _patch_digest(patch: str) -> str:
+    """Fixed-size (64 hex chars) cache-key part. Raw patches can be huge;
+    using them as dict keys would pin diff text in memory for the whole TTL."""
+    return hashlib.sha256(patch.encode("utf-8", errors="replace")).hexdigest()
+
 @app.get("/")
 async def root():
     return {"message": "AI Code Reviewer"}
@@ -74,9 +81,7 @@ async def get_pr_diff(
         pr_number
     )
     files = parse_diff(diff)
-    # for file in files:
-    #     file["content"] = await get_file_content(owner=owner, repo=repo,filename=file["filename"])
-    #     print(file["content"])
+
     return files
 
 async def safe_review(
@@ -93,7 +98,7 @@ async def safe_review(
             "status": "skipped",
             "message": "Binary file - nothing to review"
         }
-    cache_key = (ref, file["filename"], file.get("patch") or "")
+    cache_key = (ref, file["filename"], _patch_digest(file.get("patch") or ""))
     cached = _lookup(_file_review_cache, cache_key)
     if cached is not None:
         return cached
