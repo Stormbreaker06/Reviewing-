@@ -4,6 +4,7 @@ import httpx
 import asyncio
 import time
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.github.client import (
     get_pull_request,
     get_pull_request_diff,
@@ -12,6 +13,15 @@ from app.github.client import (
 from app.github.diff_parser import parse_diff
 from app.llm import review_code
 app = FastAPI()
+
+# Browsers block cross-origin fetches by default; this tells them the Vite dev
+# server (http://localhost:5173) is allowed to call this API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 # Same PR (same head SHA) + same file patch -> same review, served from cache.
 # Only successful, parsed reviews are cached; failures/garbage are NEVER stored
@@ -23,9 +33,15 @@ CACHE_TTL = float(os.getenv("REVIEW_CACHE_TTL", "600"))
 
 
 def _remember(cache: dict, key: tuple, value) -> None:
+    now = time.monotonic()
+    # Sweep expired entries first so dead keys never waste a slot
+    # (cache is capped at CACHE_LIMIT entries, so this scan is cheap).
+    for stale in [k for k, (_, stored_at) in cache.items() if now - stored_at > CACHE_TTL]:
+        cache.pop(stale, None)
     if len(cache) >= CACHE_LIMIT:
+        # With touch-on-hit below, the first key is the LEAST recently used.
         cache.pop(next(iter(cache)))
-    cache[key] = (value, time.monotonic())
+    cache[key] = (value, now)
 
 
 def _lookup(cache: dict, key: tuple):
@@ -36,6 +52,11 @@ def _lookup(cache: dict, key: tuple):
     if time.monotonic() - stored_at > CACHE_TTL:
         cache.pop(key, None)
         return None
+    # Touch: delete + re-insert so eviction removes the least RECENTLY used
+    # entry. NOTE: plain `cache[key] = entry` would NOT move an existing key
+    # - dict assignment updates in place; only delete+insert reorders.
+    cache.pop(key, None)
+    cache[key] = entry
     return value
 
 
