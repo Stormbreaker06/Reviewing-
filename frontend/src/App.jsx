@@ -1,121 +1,80 @@
 import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
+import PrForm from './components/PrForm'
+import Summary from './components/Summary'
+import FileReview from './components/FileReview'
+import { fetchReview } from './api'
 import './App.css'
 
+// Step 6: the app shell that wires everything together.
+// State lives here so the child components stay simple ("props in, UI out").
 function App() {
-  const [count, setCount] = useState(0)
+  const [files, setFiles] = useState(null) // null = never reviewed yet
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [current, setCurrent] = useState(null) // {owner, repo, prNumber}
+
+  async function handleReview({ owner, repo, prNumber }) {
+    setLoading(true)
+    setError(null)
+    setFiles(null)
+    setCurrent({ owner, repo, prNumber })
+    try {
+      const data = await fetchReview(owner, repo, prNumber)
+      setFiles(Array.isArray(data) ? data : [])
+    } catch (err) {
+      setError(err.message) // network failure / FastAPI error detail
+    } finally {
+      setLoading(false) // always runs - success or failure
+    }
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
+    <main className="shell">
+      <header className="top">
+        <h1>
+          CodeTurtle <span>AI PR Reviewer</span>
+        </h1>
+        <p>Paste a pull request, get per-file findings from the review pipeline.</p>
+      </header>
+
+      <PrForm onSubmit={handleReview} loading={loading} />
+
+      {loading && (
+        <div className="loading">
+          <div className="spinner" />
           <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
+            Reviewing
+            {current ? ` ${current.owner}/${current.repo}#${current.prNumber}` : ''}…<br />
+            The first request runs the full LLM pipeline (can take a while) - repeat requests
+            are served from the cache.
           </p>
         </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+      )}
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+      {error && (
+        <div className="error-banner">
+          <strong>Review failed:</strong> {error}
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      )}
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      {files && !loading && (
+        <>
+          <Summary files={files} />
+          <section className="file-list">
+            {files.length === 0 && <p className="empty">No changed files found in this PR.</p>}
+            {files.map((file) => (
+              <FileReview
+                key={file.filename}
+                file={file}
+                owner={current.owner}
+                repo={current.repo}
+                prNumber={current.prNumber}
+              />
+            ))}
+          </section>
+        </>
+      )}
+    </main>
   )
 }
 

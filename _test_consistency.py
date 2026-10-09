@@ -577,6 +577,34 @@ async def test_cache_key_hashing():
     check("different patch -> different key", counters["review"] == 2, counters)
 
 
+async def test_cache_lru_and_sweep():
+    saved_limit, saved_ttl = app_main.CACHE_LIMIT, app_main.CACHE_TTL
+    try:
+        # LRU: touching A must make B the eviction victim, not A
+        app_main.CACHE_LIMIT = 2
+        app_main.CACHE_TTL = 600
+        cache = {}
+        app_main._remember(cache, ("a",), "A")
+        app_main._remember(cache, ("b",), "B")
+        app_main._lookup(cache, ("a",)) # touch A -> B becomes least recently used
+        app_main._remember(cache, ("c",), "C")
+        check("eviction removes least-recently-used",
+              ("a",) in cache and ("b",) not in cache and ("c",) in cache, dict(cache))
+
+        # Sweep: an expired entry must disappear on the NEXT write,
+        # even if nobody ever looks it up again
+        app_main.CACHE_TTL = 0.01
+        cache2 = {}
+        app_main._remember(cache2, ("old",), "OLD")
+        await asyncio.sleep(0.03)
+        app_main._remember(cache2, ("new",), "NEW")
+        check("expired entries swept on write",
+              ("old",) not in cache2 and ("new",) in cache2, dict(cache2))
+    finally:
+        app_main.CACHE_LIMIT = saved_limit
+        app_main.CACHE_TTL = saved_ttl
+
+
 async def main():
     await test_llm()
     await test_main_cache()
@@ -585,6 +613,7 @@ async def main():
     await test_base_url_detection()
     await test_deleted_binary()
     await test_cache_key_hashing()
+    await test_cache_lru_and_sweep()
 
     ok = True
     for name, passed, info in results:
