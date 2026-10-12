@@ -6,7 +6,6 @@ export default function Summary({ files }) {
       acc.total += 1
       const review = typeof file.review === 'string' ? { status: 'error' } : (file.review ?? {})
       if (review.status === 'reviewed') {
-        acc.withIssues += 1
         for (const issue of review.issues ?? []) {
           const sev = String(issue.severity ?? '').toLowerCase()
           if (sev === 'high') acc.high += 1

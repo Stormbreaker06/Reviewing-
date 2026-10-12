@@ -57,7 +57,7 @@ function App() {
         </div>
       )}
 
-      {files && !loading && (
+      {files && current && !loading && (
         <>
           <Summary files={files} />
           <section className="file-list">
