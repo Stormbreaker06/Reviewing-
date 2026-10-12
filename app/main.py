@@ -113,7 +113,7 @@ async def safe_review(
         ref: str,
         base_ref: str = None
     ):
-    # Binary files have nothing textual to review - never fetch, never call the LLM.
+
     if file.get("status") == "binary":
         return {
             "status": "skipped",
